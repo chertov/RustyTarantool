@@ -6,7 +6,7 @@ use crate::tarantool::tools;
 use rmpv::Value;
 use serde::{Deserialize, Serialize};
 
-use bytes::{Bytes, IntoBuf};
+use bytes::{Bytes, buf::BufExt};
 
 /// tarantool auth packet
 #[derive(Debug)]
@@ -91,7 +91,7 @@ impl TarantoolResponse {
     where
         T: Deserialize<'de>,
     {
-        tools::decode_serde(self.data.into_buf())
+        tools::decode_serde(self.data.reader())
     }
 
     /// decode tarantool response to tuple wih one element and return this element
@@ -99,7 +99,7 @@ impl TarantoolResponse {
     where
         T: Deserialize<'de>,
     {
-        let (res,) = tools::decode_serde(self.data.into_buf())?;
+        let (res,) = tools::decode_serde(self.data.reader())?;
         Ok(res)
     }
 
@@ -109,7 +109,7 @@ impl TarantoolResponse {
         T1: Deserialize<'de>,
         T2: Deserialize<'de>,
     {
-        Ok(tools::decode_serde(self.data.into_buf())?)
+        Ok(tools::decode_serde(self.data.reader())?)
     }
 
     ///decode tarantool response to three elements
@@ -119,7 +119,7 @@ impl TarantoolResponse {
         T2: Deserialize<'de>,
         T3: Deserialize<'de>,
     {
-        let (r1, r2, r3) = tools::decode_serde(self.data.into_buf())?;
+        let (r1, r2, r3) = tools::decode_serde(self.data.reader())?;
         Ok((r1, r2, r3))
     }
 }

@@ -1,10 +1,11 @@
 use std::io;
 use std::sync::{Arc, Mutex, RwLock};
 
-use futures::stream::Stream;
-use futures::sync::mpsc;
-use futures::sync::oneshot;
-use futures::{Future, IntoFuture};
+use futures::channel::mpsc;
+use futures::channel::oneshot;
+use futures::future::{ Future, FutureExt, TryFutureExt, IntoFuture };
+use futures::stream::{ Stream, StreamExt, TryStreamExt };
+use futures::sink::{ Sink, SinkExt };
 use serde::Serialize;
 use tokio;
 
@@ -70,7 +71,7 @@ impl Client {
     }
 
     /// return notify stream with connection statuses
-    pub fn subscribe_to_notify_stream(&self) -> impl Stream<Item = ClientStatus, Error = ()> {
+    pub fn subscribe_to_notify_stream(&self) -> impl Stream<Item = ClientStatus> {
         let (callback_sender, callback_receiver) = mpsc::unbounded();
         self.notify_callbacks.write().unwrap().push(callback_sender);
         callback_receiver
@@ -80,7 +81,7 @@ impl Client {
     pub fn send_command(
         &self,
         req: CommandPacket,
-    ) -> impl Future<Item = TarantoolResponse, Error = io::Error> {
+    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>> {
         let dispatch = self.dispatch.clone();
 
         let (callback_sender, callback_receiver) = oneshot::channel();
@@ -132,7 +133,7 @@ impl Client {
         &self,
         function: &str,
         params: &T,
-    ) -> impl Future<Item = TarantoolResponse, Error = io::Error>
+    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
     where
         T: Serialize,
     {
@@ -146,7 +147,7 @@ impl Client {
         &self,
         function: &str,
         param1: &T1,
-    ) -> impl Future<Item = TarantoolResponse, Error = io::Error>
+    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
     where
         T1: Serialize,
     {
@@ -170,7 +171,7 @@ impl Client {
         function: &str,
         param1: &T1,
         param2: &T2,
-    ) -> impl Future<Item = TarantoolResponse, Error = io::Error>
+    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
     where
         T1: Serialize,
         T2: Serialize,
@@ -187,7 +188,7 @@ impl Client {
         param1: &T1,
         param2: &T2,
         param3: &T3,
-    ) -> impl Future<Item = TarantoolResponse, Error = io::Error>
+    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
     where
         T1: Serialize,
         T2: Serialize,
@@ -206,7 +207,7 @@ impl Client {
         param2: &T2,
         param3: &T3,
         param4: &T4,
-    ) -> impl Future<Item = TarantoolResponse, Error = io::Error>
+    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
     where
         T1: Serialize,
         T2: Serialize,
@@ -227,7 +228,7 @@ impl Client {
         param3: &T3,
         param4: &T4,
         param5: &T5,
-    ) -> impl Future<Item = TarantoolResponse, Error = io::Error>
+    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
     where
         T1: Serialize,
         T2: Serialize,
@@ -257,7 +258,7 @@ impl Client {
         offset: i32,
         limit: i32,
         iterator: i32,
-    ) -> impl Future<Item = TarantoolResponse, Error = io::Error>
+    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
     where
         T: Serialize,
     {
@@ -275,7 +276,7 @@ impl Client {
         &self,
         space: i32,
         tuple: &T,
-    ) -> impl Future<Item = TarantoolResponse, Error = io::Error>
+    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
     where
         T: Serialize,
     {
@@ -296,7 +297,7 @@ impl Client {
         &self,
         space: i32,
         tuple: &T,
-    ) -> impl Future<Item = TarantoolResponse, Error = io::Error>
+    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
     where
         T: Serialize,
     {
@@ -318,7 +319,7 @@ impl Client {
         &self,
         space: i32,
         tuple_raw: Vec<u8>,
-    ) -> impl Future<Item = TarantoolResponse, Error = io::Error> {
+    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>> {
         self.send_command(CommandPacket::replace_raw(space, tuple_raw).unwrap())
     }
 
@@ -339,7 +340,7 @@ impl Client {
         space: i32,
         key: &T2,
         args: &T,
-    ) -> impl Future<Item = TarantoolResponse, Error = io::Error>
+    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
     where
         T: Serialize,
         T2: Serialize,
@@ -362,7 +363,7 @@ impl Client {
         key: &T2,
         def: &T3,
         args: &T,
-    ) -> impl Future<Item = TarantoolResponse, Error = io::Error>
+    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
     where
         T: Serialize,
         T2: Serialize,
@@ -382,7 +383,7 @@ impl Client {
         &self,
         space: i32,
         key: &T,
-    ) -> impl Future<Item = TarantoolResponse, Error = io::Error>
+    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
     where
         T: Serialize,
     {
@@ -401,7 +402,7 @@ impl Client {
         &self,
         expression: String,
         args: &T,
-    ) -> impl Future<Item = TarantoolResponse, Error = io::Error>
+    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
     where
         T: Serialize,
     {
@@ -416,7 +417,7 @@ impl Client {
     /// client.ping()
     ///
     #[inline(always)]
-    pub fn ping(&self) -> impl Future<Item = TarantoolResponse, Error = io::Error> {
+    pub fn ping(&self) -> impl Future<Output = Result<TarantoolResponse, io::Error>> {
         self.send_command(CommandPacket::ping().unwrap())
     }
 }

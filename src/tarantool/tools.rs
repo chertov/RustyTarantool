@@ -42,7 +42,7 @@ pub fn make_map_err_to_io() -> io::Error {
     io::Error::new(io::ErrorKind::Other, "Cant get key from map!")
 }
 
-pub fn search_key_in_msgpack_map(mut r: Cursor<BytesMut>, search_key: u64) -> io::Result<Bytes> {
+pub fn search_key_in_msgpack_map(mut r: std::io::Cursor<BytesMut>, search_key: u64) -> io::Result<Bytes> {
     r.read_u8()?;
     if r.remaining() == 0 {
         Ok(Bytes::new())

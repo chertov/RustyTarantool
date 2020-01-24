@@ -3,12 +3,13 @@ use crate::tarantool::tools::{
     decode_serde, get_map_value, make_auth_digest, map_err_to_io, search_key_in_msgpack_map,
     serialize_to_buf_mut, write_u32_to_slice, SafeBytesMutWriter,
 };
-use bytes::{BufMut, Bytes, BytesMut, IntoBuf};
+use bytes::{BufMut, Bytes, BytesMut, buf::BufExt};
 use rmp::encode;
 use rmpv::{self, decode, Value};
 use std::io;
 use std::str;
-use tokio_codec::{Decoder, Encoder};
+
+use tokio_util::codec::{Decoder, Encoder};
 
 pub type RequestId = u64;
 pub type TarantoolFramedRequest = (RequestId, TarantoolRequest);
@@ -72,7 +73,7 @@ fn parse_response(
 ) -> io::Result<(RequestId, io::Result<TarantoolResponse>)> {
     buf.split_to(5);
     let response_body = buf.split_to(size);
-    let mut r = response_body.into_buf();
+    let mut r = std::io::Cursor::new(response_body);
 
     let headers = decode::read_value(&mut r).map_err(map_err_to_io)?;
     let (code, sync) = parse_headers(headers)?;
