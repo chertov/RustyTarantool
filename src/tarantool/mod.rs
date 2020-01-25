@@ -3,9 +3,9 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use futures::channel::mpsc;
 use futures::channel::oneshot;
-use futures::future::{ Future, FutureExt, TryFutureExt, IntoFuture };
-use futures::stream::{ Stream, StreamExt, TryStreamExt };
-use futures::sink::{ Sink, SinkExt };
+// use futures::future::{ Future, FutureExt, TryFuture, TryFutureExt, IntoFuture };
+use futures::stream::{ Stream };
+// use futures::sink::{ Sink, SinkExt };
 use serde::Serialize;
 use tokio;
 
@@ -78,28 +78,26 @@ impl Client {
     }
 
     /// send any command you manually create, this method is low level and not intended to be used
-    pub fn send_command(
+    pub async fn send_command(
         &self,
         req: CommandPacket,
-    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>> {
+    ) -> Result<TarantoolResponse, io::Error> {
         let dispatch = self.dispatch.clone();
 
         let (callback_sender, callback_receiver) = oneshot::channel();
         let send_res = self.command_sender.unbounded_send((req, callback_sender));
-        send_res
-            .into_future()
-            .map_err(|_e| io::Error::new(io::ErrorKind::Other, ERROR_DISPATCH_THREAD_IS_DEAD))
-            .and_then(move |_r| {
-                if let Some(extracted_dispatch) = dispatch.lock().unwrap().take() {
-                    debug!("spawn coroutine!");
-                    //lazy spawning main coroutine in first tarantool call
-                    tokio::spawn(extracted_dispatch);
-                }
-                callback_receiver
-                    .into_future()
-                    .map_err(|_e| io::Error::new(io::ErrorKind::Other, ERROR_CLIENT_DISCONNECTED))
-            })
-            .and_then(|r| r)
+        if let Err(_) = send_res {
+            return Err(io::Error::new(io::ErrorKind::Other, ERROR_DISPATCH_THREAD_IS_DEAD));
+        }
+        if let Some(extracted_dispatch) = dispatch.lock().unwrap().take() {
+            debug!("spawn coroutine!");
+            //lazy spawning main coroutine in first tarantool call
+            tokio::spawn(extracted_dispatch);
+        }
+        match callback_receiver.await {
+            Ok(res) => res,
+            Err(err) => Err(io::Error::new(io::ErrorKind::Other, ERROR_CLIENT_DISCONNECTED))
+        }
     }
 
     /// call tarantool stored procedure
@@ -129,29 +127,29 @@ impl Client {
     ///        })
     ///
     #[inline(always)]
-    pub fn call_fn<T>(
+    pub async fn call_fn<T>(
         &self,
         function: &str,
         params: &T,
-    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
+    ) -> Result<TarantoolResponse, io::Error>
     where
         T: Serialize,
     {
-        self.send_command(CommandPacket::call(function, params).unwrap())
+        self.send_command(CommandPacket::call(function, params).unwrap()).await
     }
 
     ///call tarantool stored procedure with one parameter
     ///
     #[inline(always)]
-    pub fn call_fn1<T1>(
+    pub async fn call_fn1<T1>(
         &self,
         function: &str,
         param1: &T1,
-    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
+    ) -> Result<TarantoolResponse, io::Error>
     where
         T1: Serialize,
     {
-        self.send_command(CommandPacket::call(function, &(param1,)).unwrap())
+        self.send_command(CommandPacket::call(function, &(param1,)).unwrap()).await
     }
 
     ///call tarantool stored procedure with two parameters
@@ -166,61 +164,61 @@ impl Client {
     ///        }) ;
     ///
     #[inline(always)]
-    pub fn call_fn2<T1, T2>(
+    pub async fn call_fn2<T1, T2>(
         &self,
         function: &str,
         param1: &T1,
         param2: &T2,
-    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
+    ) -> Result<TarantoolResponse, io::Error>
     where
         T1: Serialize,
         T2: Serialize,
     {
-        self.send_command(CommandPacket::call(function, &(param1, param2)).unwrap())
+        self.send_command(CommandPacket::call(function, &(param1, param2)).unwrap()).await
     }
 
     ///call tarantool stored procedure with three parameters
     ///
     #[inline(always)]
-    pub fn call_fn3<T1, T2, T3>(
+    pub async fn call_fn3<T1, T2, T3>(
         &self,
         function: &str,
         param1: &T1,
         param2: &T2,
         param3: &T3,
-    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
+    ) -> Result<TarantoolResponse, io::Error>
     where
         T1: Serialize,
         T2: Serialize,
         T3: Serialize,
     {
-        self.send_command(CommandPacket::call(function, &(param1, param2, param3)).unwrap())
+        self.send_command(CommandPacket::call(function, &(param1, param2, param3)).unwrap()).await
     }
 
     ///call tarantool stored procedure with four parameters
     ///
     #[inline(always)]
-    pub fn call_fn4<T1, T2, T3, T4>(
+    pub async fn call_fn4<T1, T2, T3, T4>(
         &self,
         function: &str,
         param1: &T1,
         param2: &T2,
         param3: &T3,
         param4: &T4,
-    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
+    ) -> Result<TarantoolResponse, io::Error>
     where
         T1: Serialize,
         T2: Serialize,
         T3: Serialize,
         T4: Serialize,
     {
-        self.send_command(CommandPacket::call(function, &(param1, param2, param3, param4)).unwrap())
+        self.send_command(CommandPacket::call(function, &(param1, param2, param3, param4)).unwrap()).await
     }
 
     ///call tarantool stored procedure with five parameters
     ///
     #[inline(always)]
-    pub fn call_fn5<T1, T2, T3, T4, T5>(
+    pub async fn call_fn5<T1, T2, T3, T4, T5>(
         &self,
         function: &str,
         param1: &T1,
@@ -228,7 +226,7 @@ impl Client {
         param3: &T3,
         param4: &T4,
         param5: &T5,
-    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
+    ) -> Result<TarantoolResponse, io::Error>
     where
         T1: Serialize,
         T2: Serialize,
@@ -238,7 +236,7 @@ impl Client {
     {
         self.send_command(
             CommandPacket::call(function, &(param1, param2, param3, param4, param5)).unwrap(),
-        )
+        ).await
     }
 
     ///call "select" from tarantool
@@ -250,7 +248,7 @@ impl Client {
     /// - iterator - type of iterator
     ///
     #[inline(always)]
-    pub fn select<T>(
+    pub async fn select<T>(
         &self,
         space: i32,
         index: i32,
@@ -258,13 +256,13 @@ impl Client {
         offset: i32,
         limit: i32,
         iterator: i32,
-    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
+    ) -> Result<TarantoolResponse, io::Error>
     where
         T: Serialize,
     {
         self.send_command(
             CommandPacket::select(space, index, key, offset, limit, iterator).unwrap(),
-        )
+        ).await
     }
 
     ///insert tuple to space
@@ -272,15 +270,15 @@ impl Client {
     /// - tuple - sequence of fields(can be vec or rust tuple)
     ///
     #[inline(always)]
-    pub fn insert<T>(
+    pub async fn insert<T>(
         &self,
         space: i32,
         tuple: &T,
-    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
+    ) -> Result<TarantoolResponse, io::Error>
     where
         T: Serialize,
     {
-        self.send_command(CommandPacket::insert(space, tuple).unwrap())
+        self.send_command(CommandPacket::insert(space, tuple).unwrap()).await
     }
 
     #[inline(always)]
@@ -293,15 +291,15 @@ impl Client {
     /// let tuple_replace= (3,"test_insert","replace");
     /// client.replace(SPACE_ID, &tuple_replace)
     ///
-    pub fn replace<T>(
+    pub async fn replace<T>(
         &self,
         space: i32,
         tuple: &T,
-    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
+    ) -> Result<TarantoolResponse, io::Error>
     where
         T: Serialize,
     {
-        self.send_command(CommandPacket::replace(space, tuple).unwrap())
+        self.send_command(CommandPacket::replace(space, tuple).unwrap()).await
     }
 
     #[inline(always)]
@@ -315,12 +313,12 @@ impl Client {
     /// let raw_buf = serialize_to_vec_u8(&tuple_replace).unwrap();
     /// client.replace_raw(SPACE_ID, raw_buf)
     ///
-    pub fn replace_raw(
+    pub async fn replace_raw(
         &self,
         space: i32,
         tuple_raw: Vec<u8>,
-    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>> {
-        self.send_command(CommandPacket::replace_raw(space, tuple_raw).unwrap())
+    ) -> Result<TarantoolResponse, io::Error> {
+        self.send_command(CommandPacket::replace_raw(space, tuple_raw).unwrap()).await
     }
 
     ///update row in tarantool
@@ -335,17 +333,17 @@ impl Client {
     /// client.update(SPACE_ID, &tuple, &update_op)
     ///
     #[inline(always)]
-    pub fn update<T, T2>(
+    pub async fn update<T, T2>(
         &self,
         space: i32,
         key: &T2,
         args: &T,
-    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
+    ) -> Result<TarantoolResponse, io::Error>
     where
         T: Serialize,
         T2: Serialize,
     {
-        self.send_command(CommandPacket::update(space, key, args).unwrap())
+        self.send_command(CommandPacket::update(space, key, args).unwrap()).await
     }
 
     ///upsert row in tuple
@@ -357,19 +355,19 @@ impl Client {
     /// client.upsert(SPACE_ID,&key, &key,&update_op)
     ///
     #[inline(always)]
-    pub fn upsert<T, T2, T3>(
+    pub async fn upsert<T, T2, T3>(
         &self,
         space: i32,
         key: &T2,
         def: &T3,
         args: &T,
-    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
+    ) -> Result<TarantoolResponse, io::Error>
     where
         T: Serialize,
         T2: Serialize,
         T3: Serialize,
     {
-        self.send_command(CommandPacket::upsert(space, key, def, args).unwrap())
+        self.send_command(CommandPacket::upsert(space, key, def, args).unwrap()).await
     }
 
     ///delete row in space
@@ -379,15 +377,15 @@ impl Client {
     /// let tuple= (3,"test_insert");
     /// client.delete(SPACE_ID,&tuple)
     #[inline(always)]
-    pub fn delete<T>(
+    pub async fn delete<T>(
         &self,
         space: i32,
         key: &T,
-    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
+    ) -> Result<TarantoolResponse, io::Error>
     where
         T: Serialize,
     {
-        self.send_command(CommandPacket::delete(space, key).unwrap())
+        self.send_command(CommandPacket::delete(space, key).unwrap()).await
     }
 
     ///eval expression in tarantool
@@ -398,15 +396,15 @@ impl Client {
     /// client.eval("return ...\n".to_string(),&(1,2))
     ///
     #[inline(always)]
-    pub fn eval<T>(
+    pub async fn eval<T>(
         &self,
         expression: String,
         args: &T,
-    ) -> impl Future<Output = Result<TarantoolResponse, io::Error>>
+    ) -> Result<TarantoolResponse, io::Error>
     where
         T: Serialize,
     {
-        self.send_command(CommandPacket::eval(expression, args).unwrap())
+        self.send_command(CommandPacket::eval(expression, args).unwrap()).await
     }
 
     ///ping tarantool server, return empty response in success
@@ -417,7 +415,7 @@ impl Client {
     /// client.ping()
     ///
     #[inline(always)]
-    pub fn ping(&self) -> impl Future<Output = Result<TarantoolResponse, io::Error>> {
-        self.send_command(CommandPacket::ping().unwrap())
+    pub async fn ping(&self) -> Result<TarantoolResponse, io::Error> {
+        self.send_command(CommandPacket::ping().unwrap()).await
     }
 }

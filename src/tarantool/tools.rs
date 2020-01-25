@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use std::error;
 use std::io;
-use std::io::Cursor;
 
 pub fn decode_serde<'de, T, R>(r: R) -> io::Result<T>
 where

@@ -3,7 +3,7 @@ use crate::tarantool::tools::{
     decode_serde, get_map_value, make_auth_digest, map_err_to_io, search_key_in_msgpack_map,
     serialize_to_buf_mut, write_u32_to_slice, SafeBytesMutWriter,
 };
-use bytes::{BufMut, Bytes, BytesMut, buf::BufExt};
+use bytes::{BufMut, Bytes, BytesMut};
 use rmp::encode;
 use rmpv::{self, decode, Value};
 use std::io;

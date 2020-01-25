@@ -5,18 +5,17 @@ use std::io;
 use std::net::SocketAddr;
 use std::string::ToString;
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::pin::Pin;
+use std::task::{ Poll, Context };
 
-use std::task::Poll;
-use futures::prelude::*;
-use futures::future::{ Future, FutureExt, TryFutureExt };
-use futures::stream::{ Stream, StreamExt, TryStreamExt };
+use futures::future::BoxFuture;
+use futures::future::{ Future, FutureExt, TryFuture, TryFutureExt };
+use futures::stream::{ Stream, StreamExt, TryStream, TryStreamExt };
 use futures::sink::{ Sink, SinkExt };
-use futures::stream::{SplitSink, SplitStream};
+use futures::stream::{ SplitSink, SplitStream };
 use futures::channel::mpsc;
 use futures::channel::oneshot;
-// use futures::{Async, AsyncSink, Future, IntoFuture, Poll, Sink, Stream};
-// use futures::{Async, AsyncSink, Future, IntoFuture, Poll, Sink, Stream};
+
 use tokio::net::TcpStream;
 use tokio::time::delay_queue;
 use tokio::time::{Delay, DelayQueue};
@@ -25,6 +24,7 @@ use tokio_util::codec::{Decoder, Framed};
 use crate::tarantool::codec::{RequestId, TarantoolCodec, TarantoolFramedRequest};
 use crate::tarantool::packets::{AuthPacket, CommandPacket, TarantoolRequest, TarantoolResponse};
 
+pub type TarantoolCodecItem = (RequestId, TarantoolRequest);
 pub type TarantoolFramed = Framed<TcpStream, TarantoolCodec>;
 pub type CallbackSender = oneshot::Sender<io::Result<TarantoolResponse>>;
 pub type ReconnectNotifySender = mpsc::UnboundedSender<ClientStatus>;
@@ -91,9 +91,11 @@ pub enum ClientStatus {
 
 enum DispatchState {
     New,
-    OnConnect(ConnectFuture),
-    OnHandshake(Box<dyn Future<Output = Result<TarantoolFramed, io::Error>> + Send>),
-    OnProcessing((SplitSink<TarantoolFramed, bytes::Bytes>, SplitStream<TarantoolFramed>)),
+    // OnConnect(Pin<Box<dyn Future<Output = Result<tokio::net::TcpStream, io::Error> > + Send>>),
+    OnConnect(BoxFuture<'static, Result<tokio::net::TcpStream, io::Error>>),
+    // OnHandshake(Pin<Box<dyn Future<Output = Result<TarantoolFramed, io::Error> > + Send>>),
+    OnHandshake(BoxFuture<'static, Result<TarantoolFramed, io::Error>>),
+    OnProcessing((SplitSink<TarantoolFramed, TarantoolCodecItem>, SplitStream<TarantoolFramed>)),
 
     OnReconnect(String),
     OnSleep(Delay, String),
@@ -131,7 +133,7 @@ impl DispatchState {
 }
 
 struct DispatchEngine {
-    command_receiver: mpsc::UnboundedReceiver<(CommandPacket, CallbackSender)>,
+    command_receiver: Pin<Box<dyn Stream<Item = (CommandPacket, CallbackSender)> + Send>>,
     awaiting_callbacks: HashMap<RequestId, CallbackSender>,
     notify_callbacks: Arc<RwLock<Vec<ReconnectNotifySender>>>,
 
@@ -139,7 +141,7 @@ struct DispatchEngine {
     command_counter: RequestId,
 
     timeout_time_ms: Option<u64>,
-    timeout_queue: DelayQueue<RequestId>,
+    timeout_queue: Pin<Box<DelayQueue<RequestId>>>,
     timeout_id_to_key: HashMap<RequestId, delay_queue::Key>,
 }
 
@@ -150,13 +152,13 @@ impl DispatchEngine {
         notify_callbacks: Arc<RwLock<Vec<ReconnectNotifySender>>>,
     ) -> DispatchEngine {
         DispatchEngine {
-            command_receiver,
+            command_receiver: Box::pin(command_receiver),
             buffered_command: None,
             awaiting_callbacks: HashMap::new(),
             notify_callbacks,
             command_counter: 3,
             timeout_time_ms,
-            timeout_queue: DelayQueue::new(),
+            timeout_queue: Box::pin(DelayQueue::new()),
             timeout_id_to_key: HashMap::new(),
         }
     }
@@ -176,18 +178,27 @@ impl DispatchEngine {
         }
     }
 
-    fn try_send_buffered_command(&mut self, sink: &mut SplitSink<TarantoolFramed, bytes::Bytes>) -> bool {
+    fn try_send_buffered_command(&mut self, cx: &mut std::task::Context, sink: Pin<&mut SplitSink<TarantoolFramed, TarantoolCodecItem>>) -> bool {
         if let Some(command) = self.buffered_command.take() {
-            if let Ok(AsyncSink::NotReady(command)) = sink.start_send(command) {
-                //return command to buffer
-                self.buffered_command = Some(command);
-                return false;
+            match sink.poll_ready(cx) {
+                Poll::Ready(Ok(())) => {
+                    if let Err(_) = sink.start_send(command) {
+                        //self.buffered_command = Some(command);
+                        return false;
+                    }
+                    //sink.poll_complete();
+                },
+                Poll::Ready(Err(err)) => {
+                    self.buffered_command = Some(command);
+                    return false;
+                }
+                Poll::Pending => { return false; }
             }
-        }
+        };
         true
     }
 
-    fn send_error_to_all(&mut self, error_description: &String) {
+    fn send_error_to_all(&mut self, cx: &mut std::task::Context, error_description: &String) {
         for (_, callback_sender) in self.awaiting_callbacks.drain() {
             let _res = callback_sender.send(Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -202,8 +213,8 @@ impl DispatchEngine {
         }
 
         loop {
-            match self.command_receiver.poll() {
-                Poll::Ready(Ok(Some((_, callback_sender)))) => {
+            match self.command_receiver.as_mut().poll_next(cx) {
+                Poll::Ready(Some((_, callback_sender))) => {
                     let _res = callback_sender.send(Err(io::Error::new(
                         io::ErrorKind::Other,
                         error_description.clone(),
@@ -214,11 +225,11 @@ impl DispatchEngine {
         }
     }
 
-    fn process_commands(&mut self, sink: &mut SplitSink<TarantoolFramed, bytes::Bytes>) -> Poll<()> {
-        let mut continue_send = self.try_send_buffered_command(sink);
+    fn process_commands(&mut self, cx: &mut std::task::Context, sink: Pin<&mut SplitSink<TarantoolFramed, TarantoolCodecItem>>) -> Poll<()> {
+        let mut continue_send = self.try_send_buffered_command(cx, sink);
         while continue_send {
-            continue_send = match self.command_receiver.poll() {
-                Poll::Ready(Ok(Some((command_packet, callback_sender)))) => {
+            continue_send = match self.command_receiver.as_mut().poll_next(cx) {
+                Poll::Ready(Some((command_packet, callback_sender))) => {
                     let request_id = self.increment_command_counter();
                     self.awaiting_callbacks.insert(request_id, callback_sender);
                     self.buffered_command =
@@ -231,9 +242,9 @@ impl DispatchEngine {
                         self.timeout_id_to_key.insert(request_id, delay_key);
                     }
 
-                    self.try_send_buffered_command(sink)
+                    self.try_send_buffered_command(cx, sink)
                 }
-                Poll::Ready(Ok(None)) => {
+                Poll::Ready(None) => {
                     //inbound sink is finished. close coroutine
                     return Poll::Ready(());
                 }
@@ -241,14 +252,15 @@ impl DispatchEngine {
             };
         }
         //skip results of poll complete
-        let _r = sink.poll_complete();
+        // let _r = sink.poll_flush();
+        let _r = sink.poll_flush(cx);
         Poll::Pending
     }
 
-    fn process_tarantool_responses(&mut self, stream: &mut SplitStream<TarantoolFramed>) -> bool {
+    fn process_tarantool_responses(&mut self, cx: &mut std::task::Context, stream: Pin<&mut SplitStream<TarantoolFramed>>) -> bool {
         loop {
-            match stream.poll() {
-                Ok(Poll::Ready(Some((request_id, command_packet)))) => {
+            match stream.poll_next(cx) {
+                Poll::Ready(Some(Ok((request_id, command_packet)))) => {
                     debug!("receive command! {} {:?} ", request_id, command_packet);
                     if let Some(_) = self.timeout_time_ms {
                         if let Some(delay_key) = self.timeout_id_to_key.remove(&request_id) {
@@ -260,7 +272,7 @@ impl DispatchEngine {
                         .remove(&request_id)
                         .map(|sender| sender.send(command_packet));
                 }
-                Ok(Poll::Ready(None)) | Err(_) => {
+                Poll::Ready(None) | Poll::Ready(Some(Err(_))) => {
                     return true;
                 }
                 _ => {
@@ -270,11 +282,11 @@ impl DispatchEngine {
         }
     }
 
-    fn process_timeouts(&mut self) {
+    fn process_timeouts(&mut self, cx: &mut std::task::Context) {
         if let Some(_) = self.timeout_time_ms {
             loop {
-                match self.timeout_queue.poll() {
-                    Ok(Poll::Ready(Some(request_id_ref))) => {
+                match self.timeout_queue.as_mut().poll_next(cx) {
+                    Poll::Ready(Some(Ok(request_id_ref))) => {
                         let request_id = request_id_ref.get_ref();
                         info!("timeout command! {} ", request_id);
                         self.timeout_id_to_key.remove(request_id);
@@ -332,80 +344,97 @@ impl Dispatch {
         self.engine.send_notify(&status_tmp);
     }
 
-    fn get_auth_seq(
+    async fn get_auth_seq(
         stream: TcpStream,
-        config: &ClientConfig,
-    ) -> Box<dyn Future<Output = Result<TarantoolFramed, io::Error>> + Send> {
+        config: ClientConfig,
+    ) -> Result<TarantoolFramed, io::Error> {
         let login = config.login.clone();
         let password = config.password.clone();
 
-        Box::new(
-            TarantoolCodec::new()
-                .framed(stream)
-                .into_future()
-                .map_err(|e| e.0)
-                .and_then(|(_first_resp, framed_io)| {
-                    framed_io
-                        .send((2, TarantoolRequest::Auth(AuthPacket { login, password })))
-                        .into_future()
-                })
-                .and_then(|framed| framed.into_future().map_err(|e| e.0))
-                .and_then(|(r, framed_io)| match r {
-                    Some((_, Err(e))) => futures::future::err(e),
-                    _ => futures::future::ok(framed_io),
-                }),
-        )
+        let res = TarantoolCodec::new().framed(stream);
+        Ok(res)
+
+//            .map_err(|e| e.0)
+//            .and_then(|(_first_resp, framed_io)| {
+//                framed_io
+//                    .send((2, TarantoolRequest::Auth(AuthPacket { login, password })))
+//                    .into_future()
+//            })
+//            .and_then(|framed| framed.into_future().map_err(|e| e.0))
+//            .and_then(|(r, framed_io)| match r {
+//                Some((_, Err(e))) => futures::future::err(e),
+//                _ => futures::future::ok(framed_io),
+//            }),
+//        Box::pin(
+//            TarantoolCodec::new()
+//                .framed(stream)
+//                .into_future()
+//                .map_err(|e| e.0)
+//                .and_then(|(_first_resp, framed_io)| {
+//                    framed_io
+//                        .send((2, TarantoolRequest::Auth(AuthPacket { login, password })))
+//                        .into_future()
+//                })
+//                .and_then(|framed| framed.into_future().map_err(|e| e.0))
+//                .and_then(|(r, framed_io)| match r {
+//                    Some((_, Err(e))) => futures::future::err(e),
+//                    _ => futures::future::ok(framed_io),
+//                }),
+//        )
     }
 }
 
 impl Future for Dispatch {
     type Output = Result<(), io::Error>;
-    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context) -> Poll<Self::Output> {
         debug!("poll ! {}", self.state);
 
+        let config = self.config.clone();
         loop {
             let new_state = match self.state {
-                DispatchState::New => Some(DispatchState::OnConnect(TcpStream::connect(
-                    &self.config.addr,
-                ))),
+                DispatchState::New => {
+                    let addr = config.addr.clone();
+                    Some(DispatchState::OnConnect(Box::pin(TcpStream::connect(addr))))
+                },
                 DispatchState::OnReconnect(ref error_description) => {
                     error!("Reconnect! error={}", error_description);
-                    self.engine.send_error_to_all(error_description);
-                    let delay_future = Delay::new(
-                        Instant::now() + Duration::from_millis(self.config.reconnect_time_ms),
+                    self.engine.send_error_to_all(cx, error_description);
+                    let delay_future = tokio::time::delay_until(
+                        tokio::time::Instant::now() + tokio::time::Duration::from_millis(config.reconnect_time_ms),
                     );
                     Some(DispatchState::OnSleep(
                         delay_future,
                         error_description.clone(),
                     ))
                 }
-                DispatchState::OnSleep(ref mut delay_future, _) => match delay_future.poll() {
-                    Poll::Ready(Ok(_)) => Some(DispatchState::New),
+                DispatchState::OnSleep(ref mut delay_future, _) => match delay_future.poll_unpin(cx) {
+                    Poll::Ready(()) => Some(DispatchState::New),
                     Poll::Pending => None,
-                    Poll::Ready(Err(err)) => Some(DispatchState::OnReconnect(err.to_string())),
+                    //Poll::Ready(Err(err)) => Some(DispatchState::OnReconnect(err.to_string())),
                 },
-                DispatchState::OnConnect(ref mut connect_future) => match connect_future.poll() {
-                    Poll::Ready(Ok(stream)) => Some(DispatchState::OnHandshake(
-                        Dispatch::get_auth_seq(stream, &self.config),
-                    )),
-                    Poll::Pending => None,
-                    Poll::Ready(Err(err)) => Some(DispatchState::OnReconnect(err.to_string())),
-                },
+                DispatchState::OnConnect(ref mut connect_future) => {
+                    match connect_future.as_mut().poll(cx) {
+                        Poll::Ready(Ok(stream)) => Some(DispatchState::OnHandshake(
+                            Dispatch::get_auth_seq(stream, self.config.clone()).boxed(),
+                        )),
+                        Poll::Ready(Err(err)) => Some(DispatchState::OnReconnect(err.to_string())),
+                        Poll::Pending => None,
+                    }
+                }
 
                 DispatchState::OnHandshake(ref mut handshake_future) => {
-                    match handshake_future.poll() {
+                    match handshake_future.as_mut().poll(cx) {
                         Poll::Ready(Ok(framed)) => {
                             self.engine.clean_command_counter();
-                            // let k: u8 = framed.split();
                             Some(DispatchState::OnProcessing(framed.split()))
-                        }
-                        Poll::Pending => None,
+                        },
                         Poll::Ready(Err(err)) => Some(DispatchState::OnReconnect(err.to_string())),
+                        Poll::Pending => None,
                     }
                 }
 
                 DispatchState::OnProcessing((ref mut sink, ref mut stream)) => {
-                    match self.engine.process_commands(sink) {
+                    match self.engine.process_commands(cx, Pin::new(sink)) {
                         Poll::Ready(()) => {
                             //                          stop client !!! exit from event loop !
                             return Poll::Ready(Ok(()));
@@ -413,12 +442,12 @@ impl Future for Dispatch {
                         _ => {}
                     }
 
-                    if self.engine.process_tarantool_responses(stream) {
+                    if self.engine.process_tarantool_responses(cx, Pin::new(stream)) {
                         Some(DispatchState::OnReconnect(
                             ERROR_SERVER_DISCONNECT.to_string(),
                         ))
                     } else {
-                        self.engine.process_timeouts();
+                        self.engine.process_timeouts(cx);
                         None
                     }
                 }
