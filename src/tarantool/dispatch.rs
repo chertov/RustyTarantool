@@ -178,11 +178,11 @@ impl DispatchEngine {
         }
     }
 
-    fn try_send_buffered_command(&mut self, cx: &mut std::task::Context, sink: Pin<&mut SplitSink<TarantoolFramed, TarantoolCodecItem>>) -> bool {
+    fn try_send_buffered_command(&mut self, cx: &mut std::task::Context, sink: &mut Pin<&mut SplitSink<TarantoolFramed, TarantoolCodecItem>>) -> bool {
         if let Some(command) = self.buffered_command.take() {
-            match sink.poll_ready(cx) {
+            match sink.as_mut().poll_ready(cx) {
                 Poll::Ready(Ok(())) => {
-                    if let Err(_) = sink.start_send(command) {
+                    if let Err(_) = sink.as_mut().start_send(command) {
                         //self.buffered_command = Some(command);
                         return false;
                     }
@@ -199,7 +199,7 @@ impl DispatchEngine {
     }
 
     fn send_error_to_all(&mut self, cx: &mut std::task::Context, error_description: &String) {
-        for (_, callback_sender) in self.awaiting_callbacks.drain() {
+        for (_, mut callback_sender) in self.awaiting_callbacks.drain() {
             let _res = callback_sender.send(Err(io::Error::new(
                 io::ErrorKind::Other,
                 error_description.clone(),
@@ -225,7 +225,7 @@ impl DispatchEngine {
         }
     }
 
-    fn process_commands(&mut self, cx: &mut std::task::Context, sink: Pin<&mut SplitSink<TarantoolFramed, TarantoolCodecItem>>) -> Poll<()> {
+    fn process_commands(&mut self, cx: &mut std::task::Context, sink: &mut Pin<&mut SplitSink<TarantoolFramed, TarantoolCodecItem>>) -> Poll<()> {
         let mut continue_send = self.try_send_buffered_command(cx, sink);
         while continue_send {
             continue_send = match self.command_receiver.as_mut().poll_next(cx) {
@@ -253,13 +253,13 @@ impl DispatchEngine {
         }
         //skip results of poll complete
         // let _r = sink.poll_flush();
-        let _r = sink.poll_flush(cx);
+        let _r = sink.as_mut().poll_flush(cx);
         Poll::Pending
     }
 
-    fn process_tarantool_responses(&mut self, cx: &mut std::task::Context, stream: Pin<&mut SplitStream<TarantoolFramed>>) -> bool {
+    fn process_tarantool_responses(&mut self, cx: &mut std::task::Context, stream: &mut Pin<&mut SplitStream<TarantoolFramed>>) -> bool {
         loop {
-            match stream.poll_next(cx) {
+            match stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok((request_id, command_packet)))) => {
                     debug!("receive command! {} {:?} ", request_id, command_packet);
                     if let Some(_) = self.timeout_time_ms {
@@ -270,7 +270,7 @@ impl DispatchEngine {
 
                     self.awaiting_callbacks
                         .remove(&request_id)
-                        .map(|sender| sender.send(command_packet));
+                        .map(|mut sender| sender.send(command_packet));
                 }
                 Poll::Ready(None) | Poll::Ready(Some(Err(_))) => {
                     return true;
@@ -290,7 +290,7 @@ impl DispatchEngine {
                         let request_id = request_id_ref.get_ref();
                         info!("timeout command! {} ", request_id);
                         self.timeout_id_to_key.remove(request_id);
-                        if let Some(callback_sender) = self.awaiting_callbacks.remove(request_id) {
+                        if let Some(mut callback_sender) = self.awaiting_callbacks.remove(request_id) {
                             //don't process result of send
                             let _res = callback_sender
                                 .send(Err(io::Error::new(io::ErrorKind::Other, ERROR_TIMEOUT)));
@@ -314,10 +314,16 @@ impl DispatchEngine {
     }
 }
 
+#[pin_project::pin_project]
 pub struct Dispatch {
     config: ClientConfig,
+
+    // #[pin]
     state: DispatchState,
+
+    #[pin]
     engine: DispatchEngine,
+
     status: Arc<RwLock<ClientStatus>>,
 }
 
@@ -337,34 +343,16 @@ impl Dispatch {
         }
     }
 
-    fn update_status(&mut self) {
-        let status_tmp = self.state.get_client_status();
-        let mut status = self.status.write().unwrap();
-        *status = status_tmp.clone();
-        self.engine.send_notify(&status_tmp);
-    }
-
     async fn get_auth_seq(
-        stream: TcpStream,
-        config: ClientConfig,
+                          stream: TcpStream,
+                          config: ClientConfig,
     ) -> Result<TarantoolFramed, io::Error> {
         let login = config.login.clone();
         let password = config.password.clone();
 
         let res = TarantoolCodec::new().framed(stream);
+        // TODO auth
         Ok(res)
-
-//            .map_err(|e| e.0)
-//            .and_then(|(_first_resp, framed_io)| {
-//                framed_io
-//                    .send((2, TarantoolRequest::Auth(AuthPacket { login, password })))
-//                    .into_future()
-//            })
-//            .and_then(|framed| framed.into_future().map_err(|e| e.0))
-//            .and_then(|(r, framed_io)| match r {
-//                Some((_, Err(e))) => futures::future::err(e),
-//                _ => futures::future::ok(framed_io),
-//            }),
 //        Box::pin(
 //            TarantoolCodec::new()
 //                .framed(stream)
@@ -384,21 +372,34 @@ impl Dispatch {
     }
 }
 
+#[pin_project::project]
+impl Dispatch {
+    fn update_status(&mut self) {
+        let status_tmp = self.state.get_client_status();
+        let mut status = self.status.write().unwrap();
+        *status = status_tmp.clone();
+        self.engine.send_notify(&status_tmp);
+    }
+}
+
 impl Future for Dispatch {
     type Output = Result<(), io::Error>;
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context) -> Poll<Self::Output> {
-        debug!("poll ! {}", self.state);
 
-        let config = self.config.clone();
+        let mut this = self.project();
+
+        debug!("poll ! {}", this.state);
+
+        let config = this.config.clone();
         loop {
-            let new_state = match self.state {
+            let new_state = match this.state {
                 DispatchState::New => {
                     let addr = config.addr.clone();
                     Some(DispatchState::OnConnect(Box::pin(TcpStream::connect(addr))))
                 },
                 DispatchState::OnReconnect(ref error_description) => {
                     error!("Reconnect! error={}", error_description);
-                    self.engine.send_error_to_all(cx, error_description);
+                    this.engine.send_error_to_all(cx, &error_description.to_string());
                     let delay_future = tokio::time::delay_until(
                         tokio::time::Instant::now() + tokio::time::Duration::from_millis(config.reconnect_time_ms),
                     );
@@ -415,7 +416,7 @@ impl Future for Dispatch {
                 DispatchState::OnConnect(ref mut connect_future) => {
                     match connect_future.as_mut().poll(cx) {
                         Poll::Ready(Ok(stream)) => Some(DispatchState::OnHandshake(
-                            Dispatch::get_auth_seq(stream, self.config.clone()).boxed(),
+                            Dispatch::get_auth_seq(stream, this.config.clone()).boxed(),
                         )),
                         Poll::Ready(Err(err)) => Some(DispatchState::OnReconnect(err.to_string())),
                         Poll::Pending => None,
@@ -425,7 +426,7 @@ impl Future for Dispatch {
                 DispatchState::OnHandshake(ref mut handshake_future) => {
                     match handshake_future.as_mut().poll(cx) {
                         Poll::Ready(Ok(framed)) => {
-                            self.engine.clean_command_counter();
+                            this.engine.clean_command_counter();
                             Some(DispatchState::OnProcessing(framed.split()))
                         },
                         Poll::Ready(Err(err)) => Some(DispatchState::OnReconnect(err.to_string())),
@@ -434,7 +435,7 @@ impl Future for Dispatch {
                 }
 
                 DispatchState::OnProcessing((ref mut sink, ref mut stream)) => {
-                    match self.engine.process_commands(cx, Pin::new(sink)) {
+                    match this.engine.process_commands(cx, &mut Pin::new(sink)) {
                         Poll::Ready(()) => {
                             //                          stop client !!! exit from event loop !
                             return Poll::Ready(Ok(()));
@@ -442,20 +443,21 @@ impl Future for Dispatch {
                         _ => {}
                     }
 
-                    if self.engine.process_tarantool_responses(cx, Pin::new(stream)) {
+                    if this.engine.process_tarantool_responses(cx, &mut Pin::new(stream)) {
                         Some(DispatchState::OnReconnect(
                             ERROR_SERVER_DISCONNECT.to_string(),
                         ))
                     } else {
-                        self.engine.process_timeouts(cx);
+                        this.engine.process_timeouts(cx);
                         None
                     }
                 }
+                _ => { unimplemented!() }
             };
 
             if let Some(new_state_value) = new_state {
-                self.state = new_state_value;
-                self.update_status();
+                *this.state = new_state_value;
+                this.update_status();
             } else {
                 break;
             }
