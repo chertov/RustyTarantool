@@ -186,7 +186,7 @@ impl DispatchEngine {
                         //self.buffered_command = Some(command);
                         return false;
                     }
-                    //sink.poll_complete();
+                    // sink.as_mut().poll_complete();
                 },
                 Poll::Ready(Err(err)) => {
                     self.buffered_command = Some(command);
@@ -349,26 +349,9 @@ impl Dispatch {
     ) -> Result<TarantoolFramed, io::Error> {
         let login = config.login.clone();
         let password = config.password.clone();
-
-        let res = TarantoolCodec::new().framed(stream);
-        // TODO auth
-        Ok(res)
-//        Box::pin(
-//            TarantoolCodec::new()
-//                .framed(stream)
-//                .into_future()
-//                .map_err(|e| e.0)
-//                .and_then(|(_first_resp, framed_io)| {
-//                    framed_io
-//                        .send((2, TarantoolRequest::Auth(AuthPacket { login, password })))
-//                        .into_future()
-//                })
-//                .and_then(|framed| framed.into_future().map_err(|e| e.0))
-//                .and_then(|(r, framed_io)| match r {
-//                    Some((_, Err(e))) => futures::future::err(e),
-//                    _ => futures::future::ok(framed_io),
-//                }),
-//        )
+        let (_first_resp, mut framed_io) = TarantoolCodec::new().framed(stream).into_future().await;
+        framed_io.send((2, TarantoolRequest::Auth(AuthPacket { login, password }))).into_future().await?;
+        Ok(framed_io)
     }
 }
 
