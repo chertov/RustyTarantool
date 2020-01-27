@@ -7,13 +7,9 @@ use tokio_util::codec::Decoder;
 use rusty_tarantool::tarantool::codec::TarantoolCodec;
 use rusty_tarantool::tarantool::packets::{AuthPacket, CommandPacket, TarantoolRequest};
 
-
 #[tokio::test]
 async fn test() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
-
-    //    let mut core = Core::new().unwrap();
-    //    let handle = core.handle();
 
     let addr : std::net::SocketAddr = "127.0.0.1:3301".parse()?;
     let stream = TcpStream::connect(addr).await?;
